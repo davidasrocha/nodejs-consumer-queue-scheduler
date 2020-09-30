@@ -1,0 +1,14 @@
+{
+  "name": "nodejs-consumer-queue-scheduler",
+  "version": "1.0.0",
+  "description": "Implements a Simple Scheduler to run a Consumer per Queue",
+  "main": "main.js",
+  "scripts": {
+    "test": ""
+  },
+  "author": "David Anderson",
+  "license": "",
+  "dependencies": {
+    "amqplib": "^0.6.0"
+  }
+}

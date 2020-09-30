@@ -1,0 +1,25 @@
+version: '3'
+
+services:
+
+  app:
+    image: node:12.18
+    working_dir: /var/www/html
+    environment:
+      RABBIT_HOST: rabbitmq
+      RABBIT_PORT: 5672
+      RABBIT_API_PORT: 15672
+    volumes:
+      - .:/var/www/html
+    depends_on:
+      - rabbitmq
+    links:
+      - rabbitmq
+
+  rabbitmq:
+    build:
+      dockerfile: ./Dockerfile
+      context: .
+    ports:
+      - 5672:5672
+      - 15672:15672
