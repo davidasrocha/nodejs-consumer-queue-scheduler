@@ -23,25 +23,19 @@ if (!cluster.isWorker) {
     const rabbitMQConnection = require('amqplib').connect(`amqp://${RABBIT_HOST}:${RABBIT_PORT}`);
 
     const startApplication = () => {
-        const RABBIT_EVENTS_EXCHANGE = 'amq.rabbitmq.event';
-        const RABBIT_EVENTS_QUEUE = 'rabbitmq.events';
-        const RABBIT_EVENTS_ROUTING_KEY = 'queue.*';
-        const RABBIT_START_EXCHANGE = 'application.event';
-        const RABBIT_START_EXCHANGE_TYPE = 'topic';
-
-        const connectDataSource = (handler) => {
-            rabbitMQConnection
-                .then((connection) => connection.createChannel())
-                .then((channel) => handler(channel));
-        };
-
+        const EXCLUSIVE_QUEUE_PREFIX_NAME = 'amq.gen';
+        
         const configureQueues = async (channel, queues) => {
-            console.log('configuring base queues');
+            const RABBIT_EVENTS_EXCHANGE = 'amq.rabbitmq.event';
+            const RABBIT_EVENTS_ROUTING_KEY = 'queue.*';
+    
+            const resultQueue = await channel.assertQueue('', { exclusive: true });
+            const queueName = resultQueue.queue;
+            const exchangeName = `app.${queueName}.event`;
 
-            await channel.assertQueue(RABBIT_EVENTS_QUEUE);
-            await channel.bindQueue(RABBIT_EVENTS_QUEUE, RABBIT_EVENTS_EXCHANGE, RABBIT_EVENTS_ROUTING_KEY);
-            await channel.assertExchange(RABBIT_START_EXCHANGE, RABBIT_START_EXCHANGE_TYPE);
-            await channel.bindQueue(RABBIT_EVENTS_QUEUE, RABBIT_START_EXCHANGE, RABBIT_EVENTS_ROUTING_KEY);
+            await channel.assertExchange(exchangeName, 'topic', { autoDelete: true });
+            await channel.bindQueue(queueName, RABBIT_EVENTS_EXCHANGE, RABBIT_EVENTS_ROUTING_KEY);
+            await channel.bindQueue(queueName, exchangeName, RABBIT_EVENTS_ROUTING_KEY);
 
             queues.forEach((queue) => {
                 const options = {
@@ -49,50 +43,49 @@ if (!cluster.isWorker) {
                         'name': queue
                     }
                 };
-                channel.publish(RABBIT_START_EXCHANGE, 'queue.created', Buffer.from(''), options);
+                channel.publish(exchangeName, 'queue.created', Buffer.from(''), options);
             });
 
-            await channel.unbindQueue(RABBIT_EVENTS_QUEUE, RABBIT_START_EXCHANGE, RABBIT_EVENTS_ROUTING_KEY);
-            await channel.deleteExchange(RABBIT_START_EXCHANGE);
+            await channel.unbindQueue(queueName, exchangeName, RABBIT_EVENTS_ROUTING_KEY);
 
-            channel.close();
-
-            eventsEmitter.emit('queues.configured');
+            eventsEmitter.emit('queues.configured', queueName);
         }
 
-        const fetchDataApplication = (channel) => {
+        const fetchDataApplication = () => {
             http.get(`http://${RABBIT_HOST}:${RABBIT_API_PORT}/api/queues`, {auth: 'guest:guest'}, (response) => {
                 let content = '';
                 response.on('data', (chunk) => { content += chunk });
                 response.on('end', () => {
                     let queues = JSON.parse(content).map((item) => item.name);
-                    queues = queues.filter((queue) => queue !== RABBIT_EVENTS_QUEUE);
-                    eventsEmitter.emit('api.data.fetched', channel, queues);
+                    queues = queues.filter((queue) => queue.indexOf(EXCLUSIVE_QUEUE_PREFIX_NAME) === -1);
+                    eventsEmitter.emit('api.data.fetched', queues);
                 });
+            });
+        };
+
+        const consumerQueueEventsHandler = (channel, queue) => {
+            channel.consume(queue, (message) => {
+                channel.ack(message);
+
+                if (message.properties.headers.name.indexOf(EXCLUSIVE_QUEUE_PREFIX_NAME) !== -1 
+                    || message.properties.headers.name === queue) {
+                    return;
+                }
+
+                eventsEmitter.emit(message.fields.routingKey, message.properties.headers.name);
             });
         };
 
         console.log('application started');
 
-        connectDataSource((channel) => {
-            fetchDataApplication(channel);
-        });
+        rabbitMQConnection
+            .then((connection) => connection.createChannel())
+            .then((channel) => {
+                fetchDataApplication();
 
-        /**
-         * react to api
-         */
-        eventsEmitter.on('api.data.fetched', configureQueues);
-
-        eventsEmitter.on('queues.configured', () => {
-            connectDataSource((channel) => {
-                launchConsumer(channel, RABBIT_EVENTS_QUEUE, (message) => {
-                    channel.ack(message);
-                    if (message.properties.headers.name !== RABBIT_EVENTS_QUEUE) {
-                        eventsEmitter.emit(message.fields.routingKey, message.properties.headers.name);
-                    }
-                });
+                eventsEmitter.on('api.data.fetched', (queues) => configureQueues(channel, queues));
+                eventsEmitter.on('queues.configured', (queue) => consumerQueueEventsHandler(channel, queue));
             });
-        });
     };
 
     const queuesSet = new QueuesSet(eventsEmitter);
